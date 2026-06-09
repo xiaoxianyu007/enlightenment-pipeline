@@ -438,9 +438,18 @@ def main():
         audio_files.append(ap)
         audio_durs.append(dur)
 
-    # ── 阶段1.5：补空隙防断层 ──
-    # 每个非末尾 bg_clip 末尾冻结 AUDIO_GAP 秒，填补句间停顿
+    # ── 阶段1.5：预填充 + 补空隙 ──
+    # 1. 非首句 clip 开头预填充 T_DUR 秒（被 xfade 消耗，保护音频时长不被缩短）
     n = len(bg_clips)
+    for i in range(1, n):
+        pre = os.path.join(td, f"bg_pre{i}.mp4")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", bg_clips[i],
+                       "-vf", f"tpad=start_mode=clone:start_duration={T_DUR}",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                       "-preset", "fast", "-crf", "20", pre],
+                      check=True, capture_output=True)
+        bg_clips[i] = pre
+    # 2. 非末尾 clip 末尾冻结 AUDIO_GAP 秒（填补句间停顿）
     for i in range(n - 1):
         ext = os.path.join(td, f"bg_ext{i}.mp4")
         subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", bg_clips[i],
@@ -449,10 +458,12 @@ def main():
                        "-preset", "fast", "-crf", "20", ext],
                       check=True, capture_output=True)
         bg_clips[i] = ext
-    # segment_durs 保存原始时长（用于音频时间轴），extended_durs 用于视频时间轴
+    # segment_durs 保存原始时长，扩展后用于 xfade 计算
     seg_original = list(segment_durs)
     for i in range(n - 1):
         segment_durs[i] += AUDIO_GAP
+    for i in range(1, n):
+        segment_durs[i] += T_DUR
 
     # ── 阶段2：计算时间轴 ──
     # 字幕时间 = 音频时间（含句间停顿）
@@ -478,16 +489,80 @@ def main():
             cmd.extend(["-i", c])
         fps = []
         pv = "0:v"
-        # 正确计算 xfade 偏移量：每次转场发生在句间停顿期间
-        # 第 i 次转场偏移 = 前 i 句音频总时长 + i 个完整停顿
-        # 不依赖 segment_durs（含扩展时长），直接用音频原始时长计算
-        cum_audio = seg_original[0]
+        cc = segment_durs[0]
         for i in range(1, n):
             cv = f"{i}:v"
             ol = f"xf{i}"
-            off = cum_audio + AUDIO_GAP  # 第 i-1 句朗读结束 → 开始转场
+            off = cc - T_DUR  # 转场在前一段的定格帧期间发生
             fps.append(f"[{pv}][{cv}]xfade=transition=fade:duration={T_DUR:.1f}:offset={off:.3f},format=yuv420p[{ol}]")
             pv = ol
-            cum_audio += AUDIO_GAP + seg_original[i]
-        final_bg_dur = cum_audio  # 背景总时长 = 音频总时长
+            cc = cc - T_DUR + segment_durs[i]
         cmd.extend(["-filter_complex", ";".join(fps), "-map", f"[{pv}]"])
+        cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23", bg_concat])
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+    log(f"  ✓ 背景视频")
+
+    # ── 阶段4：叠加字幕 ──
+    log("叠加字幕 overlay...")
+    ep_tag = f"_ep{args.episode}" if args.episode > 0 else ""
+    final_out = os.path.join(OUTPUT_DIR, f"demo_final{ep_tag}.mp4")
+    cmd2 = [FFMPEG, "-y", "-loglevel", "error", "-i", bg_concat]
+    for grn, _ in sub_overlays:
+        cmd2.extend(["-i", grn])
+    fps2 = []
+    pv2 = "0:v"
+    for i, ((s, e), (grn, _)) in enumerate(zip(sub_timeline, sub_overlays)):
+        sl = f"{i+1}:v"
+        ck = f"ck{i}"
+        ol = f"ol{i}"
+        fps2.append(f"[{sl}]chromakey=0x00FF00:0.15:0.05[{ck}]")
+        fps2.append(f"[{pv2}][{ck}]overlay=0:0:format=auto:enable='between(t,{s:.1f},{e:.1f})'[{ol}]")
+        pv2 = ol
+    cmd2.extend(["-filter_complex", ";".join(fps2), "-map", f"[{pv2}]"])
+    cmd2.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23",
+                  os.path.join(td, "_subbed.mp4")])
+    subprocess.run(cmd2, check=True, capture_output=True, text=True, timeout=120)
+
+    # ── 阶段5：音频拼接 ──
+    log("合成音频...")
+    aud_concat = os.path.join(td, "audio.mp3")
+    aud_segments = []
+    for i, ap in enumerate(audio_files):
+        seg = os.path.join(td, f"aseg{i}.mp3")
+        subprocess.run([FFMPEG, "-y", "-i", ap, "-vn", "-acodec", "libmp3lame", "-q:a", "2", seg],
+                       check=True, capture_output=True)
+        aud_segments.append(seg)
+        if i < len(audio_files) - 1 and AUDIO_GAP > 0:
+            gap = os.path.join(td, f"gap{i}.mp3")
+            subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                           f"anullsrc=r=44100:cl=mono", "-t", str(AUDIO_GAP), gap],
+                           check=True, capture_output=True)
+            aud_segments.append(gap)
+    alist = os.path.join(td, "alist.txt")
+    with open(alist, "w") as f:
+        for s in aud_segments:
+            f.write(f"file '{s}'\n")
+    subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", alist,
+                    "-c", "copy", aud_concat],
+                   check=True, capture_output=True, timeout=30)
+    aud_dur = probe_dur(aud_concat)
+    log(f"  ✓ 音频 {aud_dur:.1f}s")
+
+    # ── 阶段6：音视频合成 ──
+    log("音视频合并...")
+    subprocess.run([FFMPEG, "-y", "-i", os.path.join(td, "_subbed.mp4"), "-i", aud_concat,
+                    "-c:v", "copy", "-c:a", "aac", "-shortest", final_out],
+                   check=True, capture_output=True, timeout=60)
+
+    sz = os.path.getsize(final_out) / 1024 / 1024
+    log(f"\n  ✓ {final_out} ({sz:.1f}MB)")
+    log(f"  旁白: Edge-TTS YunyangNeural SSML 中文 | 字幕: 中英双语")
+    log(f"  转场 {T_DUR}s | 句间停顿 {AUDIO_GAP}s")
+
+    shutil.rmtree(td, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    # 动态导入 glob 用于 _find_latest_images
+    import glob as glob_mod
+    main()
