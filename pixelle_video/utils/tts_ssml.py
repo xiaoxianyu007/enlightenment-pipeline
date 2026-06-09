@@ -52,10 +52,10 @@ def _enhance_text(text: str) -> str:
         i = 0
         while i < len(parts):
             chunk = parts[i]
-            if len(chunk) > 35 and i % 2 == 0:
+            if len(chunk) > 50 and i % 2 == 0:
                 mid = len(chunk) // 2
-                for m in re.finditer(r'(?<=[了的是])', chunk):
-                    if m.start() > 15:
+                for m in re.finditer(r'(?<=[了的是在和与把被将以从])', chunk):
+                    if 15 < m.start() < len(chunk) - 10:
                         mid = m.start()
                         break
                 result.append(chunk[:mid] + '，')
