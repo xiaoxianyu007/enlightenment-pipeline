@@ -239,7 +239,7 @@ def _gen_image_prompts(title_en, en_sentences):
                         f"18th century European, no Asian, no modern, no text.\n"
                         f"{items}"
                     )}],
-                    temperature=0.7, max_tokens=4096, response_format={"type": "json_object"})
+                    temperature=0.7, max_tokens=8192, response_format={"type": "json_object"})
                 data = json.loads(resp.choices[0].message.content)
                 prompts = data if isinstance(data, list) else data.get("image_prompts", [])
                 # 归一化：确保每个元素是字符串
