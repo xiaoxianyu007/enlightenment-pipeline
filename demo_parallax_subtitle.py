@@ -43,6 +43,7 @@ SERIES_CONFIG = {
             "fine cross-hatching, high contrast black and white, antique paper texture, "
             "dramatic chiaroscuro lighting, European historical scene"
         ),
+        "neg_suffix": ", no Chinese, no Asian features, no modern elements, no text",
     },
     "american_revolution": {
         "name": ("American Revolution", "美国独立战争"),
@@ -54,6 +55,7 @@ SERIES_CONFIG = {
             "fine cross-hatching, high contrast black and white, antique paper texture, "
             "colonial American historical scene, revolutionary war era"
         ),
+        "neg_suffix": ", no Chinese, no Asian features, no modern elements, no text",
     },
     "thirty_years_war": {
         "name": ("Thirty Years' War", "三十年战争"),
@@ -65,6 +67,7 @@ SERIES_CONFIG = {
             "dark chiaroscuro, fine cross-hatching, high contrast black and white, "
             "antique paper texture, battlefield scenes, Holy Roman Empire setting"
         ),
+        "neg_suffix": ", no Chinese, no Asian features, no modern elements, no text",
     },
     "age_of_exploration": {
         "name": ("Age of Exploration", "大航海时代"),
@@ -76,6 +79,7 @@ SERIES_CONFIG = {
             "fine cross-hatching, high contrast black and white, aged parchment texture, "
             "European maritime exploration scene, Renaissance cartography"
         ),
+        "neg_suffix": ", no Chinese, no Asian features, no modern elements, no text",
     },
     "qin_empire": {
         "name": ("Qin Empire", "大秦帝国"),
@@ -87,6 +91,7 @@ SERIES_CONFIG = {
             "traditional Chinese ink painting aesthetic, strong contrast black and white, "
             "ancient Chinese historical scene, solemn composition"
         ),
+        "neg_suffix": ", no non-Chinese, no modern, no Western architecture, no text",
     },
 }
 
@@ -243,8 +248,7 @@ def _gen_image_prompts(title_en, en_sentences):
                     return prompts
     except Exception as e:
         log(f"  LLM失败: {e}")
-    return [f"{STYLE_PROMPT}: {s[:200]}, no Chinese people, no Asian features, no modern elements, no text"
-            for s in en_sentences]
+    return [f"{STYLE_PROMPT}: {s[:200]}" for s in en_sentences]
 
 
 def _auto_gen_images(ep, title_en, en_sentences, limit=0):
@@ -269,6 +273,10 @@ def _auto_gen_images(ep, title_en, en_sentences, limit=0):
     prompts = _gen_image_prompts(title_en, [en_sentences[i] for i in missing])
     for j, (idx, prompt) in enumerate(zip(missing, prompts)):
         out = images[idx]
+        # 强制追加反制后缀，确保 LLM 忘写时也有兜底
+        neg = SERIES_CONFIG.get(CURRENT_SERIES, {}).get("neg_suffix", "")
+        if neg and not prompt.endswith(neg):
+            prompt = prompt + neg
         log(f"  [{j+1}/{len(missing)}] {prompt[:60]}...", end=" ")
         try:
             pid = _comfy_queue(prompt, seed=42 + ep * 100 + idx)
