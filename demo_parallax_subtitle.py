@@ -252,7 +252,7 @@ def _auto_gen_images(ep, title_en, en_sentences, limit=0):
     n = min(len(en_sentences), limit) if limit > 0 else len(en_sentences)
     images = []
     for i in range(n):
-        out = os.path.join(EP_IMG_DIR, f"ep{ep:02d}_{i:02d}_image.png")
+        out = os.path.join(EP_IMG_DIR, f"{CURRENT_SERIES}_ep{ep:02d}_{i:02d}_image.png")
         images.append(out)
     missing = [i for i, p in enumerate(images) if not os.path.exists(p)]
     if not missing:

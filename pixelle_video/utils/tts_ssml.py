@@ -7,22 +7,29 @@ Edge-TTS 中文旁白工具（Yunyang · 标点增强 · 逐句情感）
 - 方案A：标点增强（逗号插入 = 自然停顿）
 """
 
-import asyncio, os, subprocess, re, shutil
+import asyncio, os, subprocess, re
 import tempfile
 
 VOICE = "zh-CN-YunyangNeural"
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "ffprobe"
+FFMPEG = "/home/shuju46/miniconda3/envs/pixelle_video/bin/ffmpeg"
+FFPROBE = FFMPEG.replace("ffmpeg", "ffprobe")
 
+# 基准参数 = demo_yunyang_v2
 BASE_RATE = "-20%"
 BASE_PITCH = "-6Hz"
 
+# 情感微调（全部围绕基准，比之前拉开更大差距）
 EMO_MAP = {
-    "calm":       ("-28%", "-10Hz"),
-    "normal":     (BASE_RATE, BASE_PITCH),
-    "passionate": ("-12%", "+2Hz"),
-    "dramatic":   ("-6%",  "+8Hz"),
+    "calm":       ("-28%", "-10Hz"),  # 平静 → 更慢更深
+    "normal":     (BASE_RATE, BASE_PITCH),  # 默认 v2
+    "passionate": ("-12%", "+2Hz"),   # 激昂 → 略快略高
+    "dramatic":   ("-6%",  "+8Hz"),   # 高潮 → 快而高
 }
+
+
+# ═══════════════════════════════════════════════════════
+#  方案A核心：标点增强 → 强制 TTS 插入自然停顿
+# ═══════════════════════════════════════════════════════
 
 _COMMA_BEFORE_WORDS = [
     "然而", "但是", "因此", "于是", "接着", "最后", "最终",
@@ -30,46 +37,70 @@ _COMMA_BEFORE_WORDS = [
 ]
 
 _COMMA_BEFORE_PATTERNS = [
-    (r'(?<=。)(在\d{4}年)', r'，\1'),
-    (r'(?<=。)(到了\d{4}年)', r'，\1'),
-    (r'(?<=。)(在.{2,8}，)', r'，\1'),
+    (r'(?<=。)(在\d{4}年)', r'，\1'),           # 。1789年 → 。，1789年 (句首时间加停顿)
+    (r'(?<=。)(到了\d{4}年)', r'，\1'),          # 。到了1789年 → 。，到了1789年
+    (r'(?<=。)(在.{2,8}，)', r'，\1'),            # 。在巴黎， → 。，在巴黎，
 ]
 
 
 def _enhance_text(text: str) -> str:
+    """
+    标点增强：在关键位置插入逗号，让 TTS 产生自然停顿。
+
+    TTS 引擎对标点有强烈反应：
+    - 逗号 → 约 200-300ms 停顿
+    - 句号 → 约 500ms 停顿
+    没有标点的长句会被一口气读完，听感机械。
+    """
+    # 1. 清除异常字符
     for ch in ['\u200b', '\u200c', '\u200d', '\ufeff', '\u00ad', '\ufffd']:
         text = text.replace(ch, '')
     for i in range(0x20):
         text = text.replace(chr(i), '')
+
+    # 2. 过渡词前加逗号（如果前面没有标点）
     for word in _COMMA_BEFORE_WORDS:
         text = re.sub(rf'(?<![，。！？、：；\s]){word}', rf'，{word}', text)
+
+    # 3. 固定模式加逗号
     for pat, repl in _COMMA_BEFORE_PATTERNS:
         text = re.sub(pat, repl, text)
 
+    # 4. 超长逗号间隔自动断句（>70字没有标点 → 在最后的安全位置插入逗号）
     def _break_long(text):
         parts = re.split(r'([，。！？、：；])', text)
         result = []
         i = 0
         while i < len(parts):
             chunk = parts[i]
-            if len(chunk) > 50 and i % 2 == 0:
-                mid = len(chunk) // 2
-                for m in re.finditer(r'(?<=[了的是在和与把被将以从])', chunk):
-                    if 15 < m.start() < len(chunk) - 10:
-                        mid = m.start()
-                        break
-                result.append(chunk[:mid] + '，')
-                result.append(chunk[mid:])
+            # 阈值提高到 70 字，减少对正常句子的干扰
+            if len(chunk) > 70 and i % 2 == 0:
+                # 找到范围内最后一个安全断点（优先不断在前半段，保护主语和修饰语不被打断）
+                best = -1
+                for m in re.finditer(r'(?<=[了的是在和与把被将以从后前也而])', chunk):
+                    if 25 < m.start() < len(chunk) - 15:
+                        best = m.start()  # 取最后一个匹配，尽量保持前面的语意完整
+                if best > 0:
+                    result.append(chunk[:best] + '，')
+                    result.append(chunk[best:])
+                else:
+                    result.append(chunk)
             else:
                 result.append(chunk)
             i += 1
         return ''.join(result)
 
     text = _break_long(text)
+
     return text.strip()
 
 
+# ═══════════════════════════════════════════════════════
+#  句子拆分与情感分类
+# ═══════════════════════════════════════════════════════
+
 def _split_sentences(text: str) -> list:
+    """按句末标点拆分"""
     parts = re.split(r'(?<=[。！？.!?])', text)
     return [p.strip() for p in parts if p.strip()] or [text]
 
@@ -86,6 +117,10 @@ def _classify_sentence(s: str) -> str:
         return "calm"
     return "normal"
 
+
+# ═══════════════════════════════════════════════════════
+#  核心：文本 → 音频
+# ═══════════════════════════════════════════════════════
 
 async def _gen_one(text: str, rate: str, pitch: str, out: str):
     import edge_tts
@@ -117,8 +152,21 @@ def _concat(seg_files: list, out: str):
 
 
 def generate(text: str, output_path: str, cinematic: bool = False) -> float:
+    """
+    生成纪录片旁白音频（Yunyang · v2参数 · 标点增强）。
+
+    Parameters
+    ----------
+    text : str
+        中文文本
+    output_path : str
+        输出 .mp3 路径
+    cinematic : bool
+        FFmpeg 后期（默认关闭）
+    """
     text = _enhance_text(text)
     sentences = _split_sentences(text)
+
     if len(sentences) == 1:
         emo = _classify_sentence(sentences[0])
         rate, pitch = EMO_MAP[emo]
@@ -126,6 +174,8 @@ def generate(text: str, output_path: str, cinematic: bool = False) -> float:
         asyncio.run(_gen_one(sentences[0], rate, pitch, tmp))
         os.replace(tmp, output_path)
         return _probe_dur(output_path)
+
+    # 多句：逐句生成 + 拼接
     segs = []
     for i, s in enumerate(sentences):
         emo = _classify_sentence(s)
@@ -133,6 +183,7 @@ def generate(text: str, output_path: str, cinematic: bool = False) -> float:
         sp = os.path.join(tempfile.gettempdir(), f"_t_{i}.mp3")
         asyncio.run(_gen_one(s, rate, pitch, sp))
         segs.append(sp)
+
     tmp = output_path.replace(".mp3", "_r.mp3")
     _concat(segs, tmp)
     os.replace(tmp, output_path)
@@ -142,3 +193,16 @@ def generate(text: str, output_path: str, cinematic: bool = False) -> float:
         except OSError:
             pass
     return _probe_dur(output_path)
+
+
+# ═══════════════════════════════════════════════════════
+#  测试
+# ═══════════════════════════════════════════════════════
+if __name__ == "__main__":
+    text = ("攻占巴士底狱的消息震撼了整个法国。"
+            "在乡村农民奋起反抗领主焚烧庄园和封建记录。"
+            "国民议会彻夜工作彻底废除了封建特权。")
+    out = "/home/shuju46/Oray/Mi/Pixelle-Video/demo_enhanced.mp3"
+    dur = generate(text, out)
+    print(f"✓ {out} ({dur:.1f}s)")
+    print(f"  预处理后: {_enhance_text(text)}")
